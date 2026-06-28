@@ -1,0 +1,18 @@
+{
+  "name": "rednote-bot-downloader",
+  "version": "1.0.0",
+  "description": "RedNote / Xiaohongshu HD Downloader Bot & Web API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node rednote_downloader.js \"http://xhslink.com/o/24kTeIFeuq9\""
+  },
+  "keywords": ["xiaohongshu", "rednote", "bot", "playwright"],
+  "author": "SUPERAGENT",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "node-telegram-bot-api": "^0.65.1",
+    "playwright": "^1.61.0"
+  }
+}

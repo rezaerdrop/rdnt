@@ -1,0 +1,6 @@
+node_modules/
+rednote_downloads/
+*.log
+.env
+debug_xhs.js
+debug_failed_scrape.png
