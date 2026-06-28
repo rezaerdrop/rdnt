@@ -40,12 +40,22 @@ function downloadMediaSecure(url, destPath) {
     });
 }
 
-async function getOriginTargetParams(rawUrl) {
-    console.log('[*] Menyelesaikan URL redirect dan mengekstrak token...');
-    const browser = await chromium.launch({ 
+// Deteksi otomatis jalur Chromium bawaan Termux Android
+const termuxChromiumPath = '/data/data/com.termux/files/usr/bin/chromium';
+const getLaunchOptions = () => {
+    const options = {
         headless: true,
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security', '--disable-blink-features=AutomationControlled']
-    });
+    };
+    if (fs.existsSync(termuxChromiumPath)) {
+        options.executablePath = termuxChromiumPath;
+    }
+    return options;
+};
+
+async function getOriginTargetParams(rawUrl) {
+    console.log('[*] Menyelesaikan URL redirect dan mengekstrak token...');
+    const browser = await chromium.launch(getLaunchOptions());
     const context = await browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
     });
@@ -101,13 +111,8 @@ async function scrapeRedNote(rawUrl) {
     }
 
     console.log('[*] Menerapkan strategi multi-celah (Desktop Murni, Mobile WeChat Crawler & OpenGraph)...');
-    const browser = await chromium.launch({ 
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security', '--disable-blink-features=AutomationControlled']
-    });
+    const browser = await chromium.launch(getLaunchOptions());
 
-    // STRATEGI PENYELESAIAN TERAKURAT: Menempatkan mode Desktop Murni (Windows UA) di urutan pertama
-    // Karena pengujian membuktikan celah desktop mampu mengurai JSON noteDetailMap secara instan tanpa dicegat WAF
     const userAgents = [
         { ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36', mode: 'desktop_native', width: 1366, height: 768 },
         { ua: 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)', mode: 'facebook_hit', width: 1280, height: 720 },
