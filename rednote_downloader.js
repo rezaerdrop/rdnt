@@ -1,9 +1,9 @@
-const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const http = require('http');
 
+// Helper download file chunking aman buat nanganin video HD
 function downloadMediaSecure(url, destPath) {
     return new Promise((resolve, reject) => {
         const file = fs.createWriteStream(destPath);
@@ -40,32 +40,34 @@ function downloadMediaSecure(url, destPath) {
     });
 }
 
-// Deteksi otomatis jalur Chromium bawaan Termux Android
-const termuxChromiumPath = '/data/data/com.termux/files/usr/bin/chromium';
-const getLaunchOptions = () => {
-    const options = {
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security', '--disable-blink-features=AutomationControlled']
-    };
-    if (fs.existsSync(termuxChromiumPath)) {
-        options.executablePath = termuxChromiumPath;
-    }
-    return options;
-};
+// Cek apakah sistem berjalan di Android Termux (dimana Playwright core tidak didukung secara natif)
+const isAndroid = process.platform === 'android';
 
-async function getOriginTargetParams(rawUrl) {
-    console.log('[*] Menyelesaikan URL redirect dan mengekstrak token...');
-    const browser = await chromium.launch(getLaunchOptions());
-    const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+// Fungsi scraper khusus untuk Android Termux menggunakan cURL/HTTPS murni tanpa memicu Playwright
+async function scrapeTermuxAndroid(rawUrl, outputDir) {
+    console.log('[*] Menjalankan Mode Termux Android (Scraping Ringan Tanpa Browser)...');
+    
+    // 1. Ekstrak Note ID via HTTP Redirect & Regex
+    console.log('[*] Melacak rute tautan Xiaohongshu...');
+    const getContent = (url) => new Promise((resolve, reject) => {
+        const client = url.startsWith('https') ? https : http;
+        client.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
+            }
+        }, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                return getContent(res.headers.location).then(resolve).catch(reject);
+            }
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => resolve({ url: res.url || url, html: data, headers: res.headers }));
+        }).on('error', reject);
     });
-    const page = await context.newPage();
-    await page.goto(rawUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.waitForTimeout(4000);
-    const resolvedUrl = page.url();
-    await browser.close();
 
-    let targetUrl = resolvedUrl;
+    const redirectRes = await getContent(rawUrl);
+    let targetUrl = redirectRes.url;
     let urlObj = new URL(targetUrl);
     
     if (urlObj.pathname.includes('/login') && urlObj.searchParams.has('redirectPath')) {
@@ -85,14 +87,161 @@ async function getOriginTargetParams(rawUrl) {
     const noteId = parts[parts.length - 1];
     const xsecToken = urlObj.searchParams.get('xsec_token') || '';
 
-    return { noteId, xsecToken, targetUrl };
+    console.log(`[*] Note ID: ${noteId}`);
+    console.log(`[*] xsec_token: ${xsecToken}`);
+
+    if (!noteId) {
+        throw new Error('Gagal memetakan Note ID dari tautan Xiaohongshu.');
+    }
+
+    // 2. Fetch data murni menggunakan trik header facebookexternalhit via HTTP Request
+    console.log('[*] Menembus WAF XHS via API Request Termux...');
+    const fetchDirect = (u) => new Promise((resolve, reject) => {
+        const urlParsed = new URL(u);
+        const options = {
+            hostname: urlParsed.hostname,
+            path: urlParsed.pathname + urlParsed.search,
+            method: 'GET',
+            headers: {
+                'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Connection': 'keep-alive'
+            }
+        };
+        https.get(options, (res) => {
+            let body = '';
+            res.on('data', c => body += c);
+            res.on('end', () => resolve(body));
+        }).on('error', reject);
+    });
+
+    const cleanExploreUrl = `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=${encodeURIComponent(xsecToken)}`;
+    const rawHtml = await fetchDirect(cleanExploreUrl);
+
+    // Cari window.__INITIAL_STATE__ di HTML
+    const match = rawHtml.match(/window\.__INITIAL_STATE__\s*=\s*({.+?})<\/script>/);
+    if (!match) {
+        throw new Error('Gagal mengekstrak JSON dari tautan. Tautan terproteksi ketat oleh WAF Xiaohongshu.');
+    }
+
+    let state;
+    try {
+        // Mengganti undefined agar valid di JSON.parse
+        const cleanJson = match[1].replace(/undefined/g, 'null');
+        state = JSON.parse(cleanJson);
+    } catch (e) {
+        throw new Error('Gagal melakukan parsing struktur JSON Xiaohongshu: ' + e.message);
+    }
+
+    const noteObj = state?.note?.noteDetailMap?.[noteId]?.note || state?.note?.noteDetailMap?.[Object.keys(state?.note?.noteDetailMap || {})[0]]?.note;
+    if (!noteObj) {
+        throw new Error('Gagal menemukan objek Note di dalam struktur state HTML.');
+    }
+
+    let result = {
+        title: noteObj.title || noteObj.desc?.substring(0, 40) || 'RedNote_Media',
+        desc: noteObj.desc || '',
+        type: noteObj.type,
+        urls: []
+    };
+    result.title = result.title.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_').substring(0, 50);
+
+    if (noteObj.type === 'video' || noteObj.video) {
+        result.type = 'video';
+        if (noteObj.video?.mediaV2) {
+            try {
+                const v2 = JSON.parse(noteObj.video.mediaV2);
+                if (v2.video?.opaque1?.hd_screencast_stream) result.urls.push(v2.video.opaque1.hd_screencast_stream);
+                else if (v2.video?.opaque1?.default_screencast_stream) result.urls.push(v2.video.opaque1.default_screencast_stream);
+            } catch(e) {}
+        }
+        if (result.urls.length === 0) {
+            const streams = noteObj.video?.media?.stream?.h264 || noteObj.video?.media?.stream?.av1 || [];
+            if (streams.length > 0) {
+                const master = streams[0].masterUrl || streams[0].backupUrls?.[0];
+                if (master) result.urls.push(master);
+            }
+        }
+    } else if (noteObj.imageList) {
+        result.type = 'images';
+        result.urls = noteObj.imageList.map(i => i.urlDefault || i.urlPre || i.url || i.infoList?.[0]?.url).filter(Boolean);
+    }
+
+    result.urls = [...new Set(result.urls.filter(Boolean))];
+
+    if (result.urls.length === 0) {
+        throw new Error('Gagal mengekstrak media. Media murni tidak tersedia atau terblokir WAF.');
+    }
+
+    console.log(`[+] Pengecekan Sukses! Menemukan ${result.urls.length} media (${result.type}) Kualitas Maksimal (HD).`);
+    const timeStamp = Date.now();
+    const saveDir = path.join(outputDir, `${result.title || 'RedNote'}_${timeStamp}`);
+    if (!fs.existsSync(saveDir)) fs.mkdirSync(saveDir, { recursive: true });
+
+    let downloadedFiles = [];
+    for (let i = 0; i < result.urls.length; i++) {
+        let mediaUrl = result.urls[i];
+        if (mediaUrl.startsWith('//')) mediaUrl = 'https:' + mediaUrl;
+        
+        const ext = result.type === 'video' ? '.mp4' : '.jpg';
+        const fileName = `hd_media_${i + 1}${ext}`;
+        const destPath = path.join(saveDir, fileName);
+        
+        console.log(`[*] Download Kualitas Tinggi (${i + 1}/${result.urls.length}) -> ${fileName}`);
+        try {
+            await downloadMediaSecure(mediaUrl, destPath);
+            const stat = fs.statSync(destPath);
+            console.log(`[+] SUKSES Download: ${destPath} (Ukuran: ${(stat.size / (1024*1024)).toFixed(2)} MB)`);
+            downloadedFiles.push(destPath);
+        } catch (err) {
+            console.error(`[-] Gagal download ${mediaUrl}:`, err.message);
+        }
+    }
+    console.log(`\n[+] Selesai! Semua file kualitas asli (HD) tersimpan di:\n${saveDir}`);
+    return { files: downloadedFiles, type: result.type, title: result.title, desc: result.desc };
 }
 
-async function scrapeRedNote(rawUrl) {
-    console.log(`[*] Mulai memproses: ${rawUrl}`);
-    const outputDir = path.join(__dirname, 'rednote_downloads');
-    if (!fs.existsSync(outputDir)) {
-        fs.mkdirSync(outputDir, { recursive: true });
+// ================= BROWSER PLAYWRIGHT MODE (UNTUK DOCKER/DESKTOP/RAILWAY) =================
+async function scrapePlaywrightDesktop(rawUrl, outputDir) {
+    const { chromium } = require('playwright');
+    
+    async function getOriginTargetParams(url) {
+        console.log('[*] Menyelesaikan URL redirect dan mengekstrak token...');
+        const browser = await chromium.launch({ 
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security', '--disable-blink-features=AutomationControlled']
+        });
+        const context = await browser.newContext({
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        });
+        const page = await context.newPage();
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.waitForTimeout(4000);
+        const resolvedUrl = page.url();
+        await browser.close();
+
+        let targetUrl = resolvedUrl;
+        let urlObj = new URL(targetUrl);
+        
+        if (urlObj.pathname.includes('/login') && urlObj.searchParams.has('redirectPath')) {
+            targetUrl = decodeURIComponent(urlObj.searchParams.get('redirectPath'));
+            urlObj = new URL(targetUrl);
+        }
+        if (urlObj.pathname.includes('/404/') && urlObj.searchParams.has('originalUrl')) {
+            targetUrl = decodeURIComponent(urlObj.searchParams.get('originalUrl'));
+            urlObj = new URL(targetUrl);
+        }
+        if (urlObj.pathname.includes('/website-login/error') && urlObj.searchParams.has('redirectPath')) {
+            targetUrl = decodeURIComponent(urlObj.searchParams.get('redirectPath'));
+            urlObj = new URL(targetUrl);
+        }
+
+        const parts = urlObj.pathname.split('/').filter(Boolean);
+        const noteId = parts[parts.length - 1];
+        const xsecToken = urlObj.searchParams.get('xsec_token') || '';
+
+        return { noteId, xsecToken, targetUrl };
     }
 
     let params;
@@ -111,7 +260,10 @@ async function scrapeRedNote(rawUrl) {
     }
 
     console.log('[*] Menerapkan strategi multi-celah (Desktop Murni, Mobile WeChat Crawler & OpenGraph)...');
-    const browser = await chromium.launch(getLaunchOptions());
+    const browser = await chromium.launch({ 
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security', '--disable-blink-features=AutomationControlled']
+    });
 
     const userAgents = [
         { ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36', mode: 'desktop_native', width: 1366, height: 768 },
@@ -314,13 +466,30 @@ async function scrapeRedNote(rawUrl) {
     return { files: downloadedFiles, type: extractedData.type, title: extractedData.title, desc: extractedData.desc };
 }
 
+// Wrapper penentu mode eksekusi (Otomatis mendeteksi Android Termux vs PC/Railway)
+async function scrapeRedNote(rawUrl) {
+    const outputDir = path.join(__dirname, 'rednote_downloads');
+    if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true });
+    }
+
+    if (isAndroid) {
+        return await scrapeTermuxAndroid(rawUrl, outputDir);
+    } else {
+        return await scrapePlaywrightDesktop(rawUrl, outputDir);
+    }
+}
+
 if (require.main === module) {
     const urlArg = process.argv[2];
     if (!urlArg) {
         console.log('Masukkan URL Xiaohongshu!');
         process.exit(1);
     }
-    scrapeRedNote(urlArg).catch(() => process.exit(1));
+    scrapeRedNote(urlArg).catch((e) => {
+        console.error('[-] Fatal Error:', e.message);
+        process.exit(1);
+    });
 }
 
 module.exports = { scrapeRedNote };
