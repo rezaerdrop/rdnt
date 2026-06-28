@@ -40,14 +40,13 @@ function downloadMediaSecure(url, destPath) {
     });
 }
 
-// Cek apakah sistem berjalan di Android Termux (dimana Playwright core tidak didukung secara natif)
+// Cek apakah sistem berjalan di Android Termux
 const isAndroid = process.platform === 'android';
 
 // Fungsi scraper khusus untuk Android Termux menggunakan cURL/HTTPS murni tanpa memicu Playwright
 async function scrapeTermuxAndroid(rawUrl, outputDir) {
     console.log('[*] Menjalankan Mode Termux Android (Scraping Ringan Tanpa Browser)...');
     
-    // 1. Ekstrak Note ID via HTTP Redirect & Regex
     console.log('[*] Melacak rute tautan Xiaohongshu...');
     const getContent = (url) => new Promise((resolve, reject) => {
         const client = url.startsWith('https') ? https : http;
@@ -94,7 +93,6 @@ async function scrapeTermuxAndroid(rawUrl, outputDir) {
         throw new Error('Gagal memetakan Note ID dari tautan Xiaohongshu.');
     }
 
-    // 2. Fetch data murni menggunakan trik header facebookexternalhit via HTTP Request
     console.log('[*] Menembus WAF XHS via API Request Termux...');
     const fetchDirect = (u) => new Promise((resolve, reject) => {
         const urlParsed = new URL(u);
@@ -119,7 +117,6 @@ async function scrapeTermuxAndroid(rawUrl, outputDir) {
     const cleanExploreUrl = `https://www.xiaohongshu.com/explore/${noteId}?xsec_token=${encodeURIComponent(xsecToken)}`;
     const rawHtml = await fetchDirect(cleanExploreUrl);
 
-    // Cari window.__INITIAL_STATE__ di HTML
     const match = rawHtml.match(/window\.__INITIAL_STATE__\s*=\s*({.+?})<\/script>/);
     if (!match) {
         throw new Error('Gagal mengekstrak JSON dari tautan. Tautan terproteksi ketat oleh WAF Xiaohongshu.');
@@ -127,7 +124,6 @@ async function scrapeTermuxAndroid(rawUrl, outputDir) {
 
     let state;
     try {
-        // Mengganti undefined agar valid di JSON.parse
         const cleanJson = match[1].replace(/undefined/g, 'null');
         state = JSON.parse(cleanJson);
     } catch (e) {
@@ -466,12 +462,27 @@ async function scrapePlaywrightDesktop(rawUrl, outputDir) {
     return { files: downloadedFiles, type: extractedData.type, title: extractedData.title, desc: extractedData.desc };
 }
 
-// Wrapper penentu mode eksekusi (Otomatis mendeteksi Android Termux vs PC/Railway)
+// Wrapper penentu mode eksekusi (Otomatis mengarahkan folder ke /storage/emulated/0/Download saat di Termux Android)
 async function scrapeRedNote(rawUrl) {
-    const outputDir = path.join(__dirname, 'rednote_downloads');
+    let outputDir = path.join(__dirname, 'rednote_downloads');
+    
+    if (isAndroid) {
+        // Cek jalur penyimpanan eksternal Android Termux
+        const androidDownloadPath = '/storage/emulated/0/Download/RedNote';
+        const termuxStoragePath = '/data/data/com.termux/files/home/storage/downloads/RedNote';
+        
+        if (fs.existsSync('/storage/emulated/0/Download')) {
+            outputDir = androidDownloadPath;
+        } else if (fs.existsSync('/data/data/com.termux/files/home/storage/downloads')) {
+            outputDir = termuxStoragePath;
+        }
+    }
+
     if (!fs.existsSync(outputDir)) {
         fs.mkdirSync(outputDir, { recursive: true });
     }
+
+    console.log(`[*] Direktori penyimpanan aktif: ${outputDir}`);
 
     if (isAndroid) {
         return await scrapeTermuxAndroid(rawUrl, outputDir);
