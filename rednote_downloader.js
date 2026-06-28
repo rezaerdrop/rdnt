@@ -42,7 +42,6 @@ function downloadMediaSecure(url, destPath) {
 
 async function getOriginTargetParams(rawUrl) {
     console.log('[*] Menyelesaikan URL redirect dan mengekstrak token...');
-    // KUNCI UTAMA DI RAILWAY/DOCKER: Wajib menggunakan --no-sandbox dan --disable-setuid-sandbox
     const browser = await chromium.launch({ 
         headless: true,
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security', '--disable-blink-features=AutomationControlled']
@@ -59,19 +58,14 @@ async function getOriginTargetParams(rawUrl) {
     let targetUrl = resolvedUrl;
     let urlObj = new URL(targetUrl);
     
-    // Menangani redirect login XHS
     if (urlObj.pathname.includes('/login') && urlObj.searchParams.has('redirectPath')) {
         targetUrl = decodeURIComponent(urlObj.searchParams.get('redirectPath'));
         urlObj = new URL(targetUrl);
     }
-    
-    // Menangani redirect 404 security XHS
     if (urlObj.pathname.includes('/404/') && urlObj.searchParams.has('originalUrl')) {
         targetUrl = decodeURIComponent(urlObj.searchParams.get('originalUrl'));
         urlObj = new URL(targetUrl);
     }
-    
-    // Menangani redirect website-login error
     if (urlObj.pathname.includes('/website-login/error') && urlObj.searchParams.has('redirectPath')) {
         targetUrl = decodeURIComponent(urlObj.searchParams.get('redirectPath'));
         urlObj = new URL(targetUrl);
@@ -164,10 +158,13 @@ async function scrapeRedNote(rawUrl) {
                             }
                         } 
                         else if (item.type === 'normal' || item.image_list || item.note_card?.image_list) {
-                            postData.type = 'images';
-                            const imageList = item.image_list || item.note_card?.image_list || [];
-                            const urls = imageList.map(img => img.info_list?.[0]?.url || img.url || img.urlDefault).filter(Boolean);
-                            if (urls.length > 0) postData.urls = [...postData.urls, ...urls];
+                            // HANYA ambil gambar jika memang tipenya bukan video
+                            if (postData.type !== 'video') {
+                                postData.type = 'images';
+                                const imageList = item.image_list || item.note_card?.image_list || [];
+                                const urls = imageList.map(img => img.info_list?.[0]?.url || img.url || img.urlDefault).filter(Boolean);
+                                if (urls.length > 0) postData.urls = [...postData.urls, ...urls];
+                            }
                         }
                     }
                 } catch (e) {}
@@ -194,6 +191,7 @@ async function scrapeRedNote(rawUrl) {
                     };
                     result.title = result.title.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_').substring(0, 50);
 
+                    // PENANGANAN KHUSUS VIDEO: Wajib mengutamakan video meskipun ada imageList (karena imageList di video adalah thumbnail/poster!)
                     if (noteObj.type === 'video' || noteObj.video) {
                         result.type = 'video';
                         if (noteObj.video?.mediaV2) {
@@ -221,11 +219,18 @@ async function scrapeRedNote(rawUrl) {
             if (stateExtract && stateExtract.urls && stateExtract.urls.length > 0) {
                 if (!postData.title) postData.title = stateExtract.title;
                 if (!postData.desc) postData.desc = stateExtract.desc;
-                postData.type = stateExtract.type;
-                postData.urls = [...postData.urls, ...stateExtract.urls];
+                // Jika dari JSON stateExtract ketemu video, kita override postData
+                if (stateExtract.type === 'video') {
+                    postData.type = 'video';
+                    postData.urls = [...stateExtract.urls]; // Reset urls dari thumbnail foto
+                } else if (postData.type !== 'video') {
+                    postData.type = stateExtract.type;
+                    postData.urls = [...postData.urls, ...stateExtract.urls];
+                }
             }
 
-            if (postData.urls.length === 0) {
+            // Fallback pemeriksaan DOM murni jika WAF mencegat __INITIAL_STATE__
+            if (postData.urls.length === 0 || postData.type !== 'video') {
                 const domExtraction = await page.evaluate(() => {
                     const video = document.querySelector('video')?.src;
                     const imgs = Array.from(document.querySelectorAll('img')).map(i => i.src).filter(src => src.includes('sns-web') || src.includes('ci.xiaohongshu.com'));
@@ -233,8 +238,8 @@ async function scrapeRedNote(rawUrl) {
                 });
                 if (domExtraction.video && !domExtraction.video.startsWith('blob:')) {
                     postData.type = 'video';
-                    postData.urls.push(domExtraction.video);
-                } else if (domExtraction.imgs.length > 0) {
+                    postData.urls = [domExtraction.video]; // Ganti seluruh URL foto jadi video
+                } else if (postData.urls.length === 0 && domExtraction.imgs.length > 0) {
                     postData.type = 'images';
                     postData.urls = [...domExtraction.imgs];
                 }
@@ -242,11 +247,16 @@ async function scrapeRedNote(rawUrl) {
 
             postData.urls = [...new Set(postData.urls.filter(u => u && !u.startsWith('blob:')))];
 
+            // Jika udah ketemu video, langsung stop. Jika ketemu foto tapi belum ketemu video, kita coba mode lain dulu buat ngejar videonya!
             if (postData.urls.length > 0) {
                 extractedData = postData;
-                console.log(`[+] Sukses menembus rotasi WAF XHS menggunakan mode: ${config.mode}`);
-                await context.close();
-                break;
+                if (postData.type === 'video') {
+                    console.log(`[+] Sukses menembus WAF XHS (Menemukan VIDEO HD) menggunakan mode: ${config.mode}`);
+                    await context.close();
+                    break;
+                } else {
+                    console.log(`[!] Mode ${config.mode} hanya menemukan foto/thumbnail. Tetap melanjutkan pencarian ke mode lain untuk mencari file Video asli...`);
+                }
             } else {
                 console.log(`[-] Mode ${config.mode} tertahan halaman login, beralih ke strategi berikutnya...`);
             }
